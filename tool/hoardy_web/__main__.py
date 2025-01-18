@@ -50,6 +50,7 @@ from kisstdlib.os import *
 from .filter import *
 from .wrr import *
 from .output import *
+from . import indexing
 
 __prog__ = "hoardy-web"
 
@@ -2627,13 +2628,8 @@ def cmd_serve(cargs: _t.Any) -> None:
     PathType: _t.TypeAlias = str
 
     index_ideal = cargs.replay if cargs.replay is not False else anytime.end
-    index: SortedIndex[URLType, Timestamp, ReqresExpr[_t.Any]] = SortedIndex()
 
-    def emit(rrexpr: ReqresExpr[DeferredSourceType]) -> None:
-        stime = rrexpr.stime
-        net_url = rrexpr.net_url
-        index.insert(net_url, stime, rrexpr, index_ideal)
-        rrexpr.unload()
+    use_sqlite_index = True
 
     if do_replay:
         if stderr.isatty():
@@ -2646,12 +2642,34 @@ def cmd_serve(cargs: _t.Any) -> None:
         handle_paths(cargs)
 
         rrexprs_load = mk_rrexprs_load(cargs)
-        seen_paths: set[PathType] = set()
-        if destination is not None and cargs.implicit and _os.path.exists(destination):
-            map_wrr_paths(
-                cargs, rrexprs_load, filters_allow, emit, [destination], seen_paths=seen_paths
+
+        if use_sqlite_index:
+            (root_path,) = cargs.paths  # Assume only one archive path for now
+            index = indexing.SqliteIndex(
+                root_path,
+                # Also assume we're using wrr for everything
+                value_load=rrexpr_wrr_loadf, value_path=lambda rrexpr: str(rrexpr.source.path)
             )
-        map_wrr_paths(cargs, rrexprs_load, filters_allow, emit, cargs.paths, seen_paths=seen_paths)
+        else:
+            index: SortedIndex[URLType, Timestamp, ReqresExpr[_t.Any]] = SortedIndex()
+
+        def emit(rrexpr: ReqresExpr[DeferredSourceType]) -> None:
+            stime = rrexpr.stime
+            net_url = rrexpr.net_url
+            index.insert(net_url, stime, rrexpr, index_ideal)
+            rrexpr.unload()
+
+        # Skip indexing if a non-empty sqlite index is present.
+        # (This breaks if we crash while indexing on startup)
+        if (not use_sqlite_index) or index.size == 0:
+            seen_paths: set[PathType] = set()
+            if destination is not None and cargs.implicit and _os.path.exists(destination):
+                map_wrr_paths(
+                    cargs, rrexprs_load, filters_allow, emit, [destination], seen_paths=seen_paths
+                )
+            map_wrr_paths(
+                cargs, rrexprs_load, filters_allow, emit, cargs.paths, seen_paths=seen_paths
+            )
     elif cargs.implicit:
         raise CatastrophicFailure("`--no-replay`: not allowed with `--implicit`")
     elif len(cargs.paths) > 0:
